@@ -1,0 +1,59 @@
+{
+  "name": "goldfinger-contracts",
+  "version": "1.0.0",
+  "description": "GoldFinger (GF) token ecosystem smart contracts",
+  "main": "truffle-config.js",
+  "directories": {
+    "test": "test",
+    "contracts": "contracts"
+  },
+  "scripts": {
+    "test": "truffle test",
+    "compile": "truffle compile",
+    "migrate": "truffle migrate",
+    "migrate:reset": "truffle migrate --reset",
+    "console": "truffle console",
+    "coverage": "truffle run coverage",
+    "flatten": "truffle-flattener contracts/*.sol",
+    "lint": "solhint contracts/*.sol",
+    "lint:fix": "solhint contracts/*.sol --fix",
+    "verify": "truffle run verify",
+    "ganache": "ganache-cli --deterministic --accounts 20 --gasLimit 0x1fffffffffffff --allowUnlimitedContractSize",
+    "setup": "npm install"
+  },
+  "keywords": [
+    "ethereum",
+    "solidity",
+    "smart-contracts",
+    "erc20",
+    "defi",
+    "goldfinger",
+    "governance",
+    "token"
+  ],
+  "author": "GoldFinger Team",
+  "license": "MIT",
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.4.0",
+    "@truffle/hdwallet-provider": "^2.1.0",
+    "dotenv": "^16.0.0"
+  },
+  "devDependencies": {
+    "@truffle/contract": "^4.6.0",
+    "ganache-cli": "^6.12.2",
+    "solhint": "^3.4.0",
+    "solidity-coverage": "^0.8.0",
+    "truffle": "^5.11.0",
+    "truffle-flattener": "^1.6.0",
+    "truffle-plugin-verify": "^0.6.0",
+    "web3": "^1.10.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/goldfinger-contracts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/goldfinger-contracts/issues"
+  },
+  "homepage": "https://github.com/yourusername/goldfinger-contracts#readme"
+}
