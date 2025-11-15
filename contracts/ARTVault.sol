@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts@5.4.0/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts@5.4.0/token/ERC20/extensions/IERC20Metadata.sol";
@@ -40,7 +40,7 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
 
     // ==================== Constants ====================
 
-    string public constant VERSION = "1.0.0";
+    string public constant VERSION = "1.0.1";
 
     uint8   public constant USD_DECIMALS = 6;
     uint256 public constant ONE_USD      = 10 ** USD_DECIMALS;
@@ -70,8 +70,11 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
     uint8 public immutable usdtDecimals;
     uint8 public immutable usdcDecimals;
 
-    // Stablecoin receiving address for minting
+    // Stablecoin receiving address for minting (vault does not custody).
     address public recipient;
+
+    // Stablecoin sender for redeem payouts (must pre-approve this vault).
+    address public redeemSender;
 
     // Fees (basis points)
     uint256 public mintFeeBps   = 50; // 0.5%
@@ -117,12 +120,6 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
     bool public isMintOpen;    // controls mintWithUSDT/USDC
     bool public isRedeemOpen;  // controls redeemToUSDT/USDC and completeRedeem
 
-    // Off-chain payout transaction hash per request
-    mapping(uint256 => string) public redeemTxHash;
-
-    // Global de-duplication for transaction digests
-    mapping(bytes32 => bool) public usedTxDigests;
-
     // ==================== Events ====================
 
     event AdminAdded(address indexed account);
@@ -131,6 +128,7 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
     event PriceOracleUpdated(address indexed oldOracle, address indexed newOracle);
     event RegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
     event RecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
+    event RedeemSenderUpdated(address indexed oldSender, address indexed newSender);
     event KycEnforcedUpdated(bool enforced);
 
     event FeesUpdated(uint256 oldMintFeeBps, uint256 newMintFeeBps, uint256 oldRedeemFeeBps, uint256 newRedeemFeeBps);
@@ -165,8 +163,6 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
     event ERC20Rescued(address indexed token, address indexed to, uint256 amount);
     event NativeRescued(address indexed to, uint256 amount);
 
-    event RedeemTxHashRecorded(uint256 indexed id, string txHash);
-
     // ==================== Errors ====================
 
     error OnlyAdminOrOwner();
@@ -185,8 +181,9 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
     error NativeTransferFailed();
     error DuplicateRequestId(uint256 requestId);
     error InvalidNAV();
-    error EmptyTransactionHash();
-    error TransactionHashAlreadyUsed(string transactionHash);
+    error RedeemSenderNotSet();
+    error InsufficientPayoutLiquidity();
+    error RecipientCannotBeThisContract();
 
     // ==================== Modifiers ====================
 
@@ -260,8 +257,11 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
 
         _addAdminInternal(msg.sender);
 
-        // Default recipient is this contract; operations may set to a treasury later
-        recipient = address(this);
+        // Default recipient SHOULD NOT be this contract for non-custodial policy.
+        recipient = msg.sender;
+
+        // Default redeem sender is unset; must be configured by owner before payouts.
+        redeemSender = address(0);
 
         isMintOpen = true;
         isRedeemOpen = true;
@@ -291,6 +291,7 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
         // Addresses
         address owner;
         address recipient;
+        address redeemSender;
         address priceOracle;
         address registry;
         address artToken;
@@ -329,6 +330,7 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
 
         s.owner           = owner();
         s.recipient       = recipient;
+        s.redeemSender    = redeemSender;
         s.priceOracle     = address(priceOracle);
         s.registry        = address(registry);
         s.artToken        = address(artToken);
@@ -379,9 +381,21 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
 
     function setRecipient(address newRecipient) external onlyOwner validAddress(newRecipient) {
         if (newRecipient == recipient) return;
+        if (newRecipient == address(this)) revert RecipientCannotBeThisContract();
         address old = recipient;
         recipient = newRecipient;
         emit RecipientUpdated(old, newRecipient);
+    }
+
+    /**
+     * @dev Set the redeem sender address used for on-chain stablecoin payouts.
+     *      This address must approve this vault for USDT/USDC allowances.
+     */
+    function setRedeemSender(address newSender) external onlyOwner validAddress(newSender) {
+        if (newSender == redeemSender) return;
+        address old = redeemSender;
+        redeemSender = newSender;
+        emit RedeemSenderUpdated(old, newSender);
     }
 
     function setKycEnforced(bool enforced) external onlyOwner {
@@ -462,7 +476,7 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
         uint256 payAmount = _scaleFromUsd6(usdAmount, dec);
         stablecoin.safeTransferFrom(msg.sender, recipient, payAmount);
 
-        // Mint ART to account via ART token vault permission
+        // Mint ART to user
         artToken.mintFromVault(msg.sender, netArt);
 
         emit ARTMinted(msg.sender, address(stablecoin), usdAmount, payAmount, grossArt, feeArt, netArt);
@@ -539,7 +553,7 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
     }
 
     /**
-     * @dev Submit redeem request; burns ART now and records payout snapshot for off-chain settlement.
+     * @dev Submit redeem request; burns ART now and records payout snapshot for on-chain settlement later.
      */
     function _submitRedeem(IERC20 stable, uint8 dec, uint256 artAmount) internal {
         uint256 nav = _nav();
@@ -551,7 +565,7 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
         // Burn ART from caller; accounting is handled in ART token
         artToken.burnFromVault(msg.sender, artAmount);
 
-        // Informational token-out values (not transferred on-chain here)
+        // Informational token-out values
         uint256 grossTokenOut = _scaleFromUsd6(usdGross, dec);
         uint256 feeTokenOut   = (grossTokenOut * redeemFeeBps) / BPS_DENOMINATOR;
         uint256 netTokenOut   = grossTokenOut - feeTokenOut;
@@ -579,7 +593,7 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
             userRedeemRequestIds[msg.sender].push(id);
         }
 
-        // Emit rich event for off-chain reconciliation
+        // Emit rich event for reconciliation
         emit RedeemRequested(
             id,
             msg.sender,
@@ -595,39 +609,33 @@ contract ARTVault is Ownable, ReentrancyGuard, Pausable {
     }
 
     /**
-     * @dev Validate and record an off-chain transaction hash (string).
-     *      Stores only the digest globally to prevent re-use across requests.
+     * @dev Admin completes redeem by pulling net amount from redeemSender to the user.
+     *      The vault does not hold stablecoins; this function reverts if redeemSender cannot cover.
      */
-    function _validateAndRecordTxHash(string calldata txHash) internal {
-        if (bytes(txHash).length == 0) revert EmptyTransactionHash();
-        bytes32 digest = keccak256(abi.encodePacked(txHash));
-        if (usedTxDigests[digest]) {
-            revert TransactionHashAlreadyUsed(txHash);
-        }
-        usedTxDigests[digest] = true;
-    }
-
-    /**
-     * @dev Admin marks completion AFTER off-chain payout, and records the transfer tx hash.
-     */
-    function completeRedeem(uint256 redeemId, string calldata txHash)
+    function completeRedeem(uint256 redeemId)
     external
     onlyAdminOrOwner
     nonReentrant
     whenNotPaused
     whenRedeemOpen
     {
+        if (redeemSender == address(0)) revert RedeemSenderNotSet();
+
         RedeemRequest storage r = redeemRequests[redeemId];
         if (r.id == 0) revert InvalidRedeemId();
         if (r.status != RedeemStatus.Pending) revert InvalidStatus();
         if (kycEnforced && !registry.isKycApproved(r.account)) revert OnlyKYCApproved();
 
-        // Validate and record off-chain transaction hash
-        _validateAndRecordTxHash(txHash);
-        redeemTxHash[redeemId] = txHash;
-        emit RedeemTxHashRecorded(redeemId, txHash);
+        IERC20 stable = IERC20(r.stableToken);
+        uint256 amount = r.tokenNetOut;
 
-        // Mark completion
+        // Strict funding checks for redeemSender
+        if (stable.allowance(redeemSender, address(this)) < amount) revert InsufficientPayoutLiquidity();
+        if (stable.balanceOf(redeemSender) < amount) revert InsufficientPayoutLiquidity();
+
+        // Execute transfer directly from redeemSender to user
+        stable.safeTransferFrom(redeemSender, r.account, amount);
+
         r.status = RedeemStatus.Completed;
         r.completedAt = uint64(block.timestamp);
 
