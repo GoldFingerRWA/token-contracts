@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts@5.4.0/token/ERC20/IERC20.sol";
 import {Ownable} from "@openzeppelin/contracts@5.4.0/access/Ownable.sol";
@@ -24,7 +24,7 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
 
     // ==================== Constants ====================
 
-    string public constant VERSION = "1.0.0";
+    string public constant VERSION = "1.0.1";
 
     // Reference total supply (for documentation, actual cap enforced by GFToken)
     uint256 public constant TOTAL_SUPPLY = 100_000_000_000 * 1e6; // 100B
@@ -99,7 +99,6 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
     // Reason codes
     uint8 public constant REASON_INITIAL_UNLOCK   = 1;
     uint8 public constant REASON_VESTING_RELEASE  = 2;
-    uint8 public constant REASON_EMERGENCY        = 3;
     uint8 public constant REASON_BATCH            = 4;
     uint8 public constant REASON_CUSTOM           = 5;
 
@@ -144,7 +143,6 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
 
     uint256 public totalVestingAllocated;
     uint256 public totalVestingReleased;
-    uint256 public totalEmergencyDistributed;
 
     // ==================== Lock Pool ====================
 
@@ -154,7 +152,7 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
         uint256 amount;        // locked amount
         uint256 startTime;     // lock start timestamp
         uint256 lockDuration;  // lock duration in seconds
-        bool    released;      // mark after user/admin withdrawal
+        bool    released;      // marked after user/admin withdrawal
     }
 
     uint256 public nextLockId = 1;
@@ -169,9 +167,7 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
     event AllocationAddressSet(Category indexed category, address indexed oldAddress, address indexed newAddress);
     event VestingCreated(uint256 indexed vestingId, address indexed beneficiary, uint256 amount, Category category, uint256 startTime);
     event TokensReleased(uint256 indexed vestingId, address indexed beneficiary, uint256 amount, uint256 totalReleased);
-    event VestingRevoked(uint256 indexed vestingId, address indexed beneficiary, uint256 revokedAmount, address revokedBy);
 
-    event EmergencyDistribution(address indexed recipient, uint256 amount, uint8 indexed reasonCode, address indexed distributedBy);
     event TokensDistributed(address indexed recipient, uint256 amount, Category indexed category, uint8 indexed reasonCode);
 
     event AdminAdded(address indexed account);
@@ -268,7 +264,6 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
         // Totals
         uint256 totalVestingAllocated;
         uint256 totalVestingReleased;
-        uint256 totalEmergencyDistributed;
 
         // Category minted so far
         uint256 teamMinted;
@@ -308,7 +303,6 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
 
         s.totalVestingAllocated   = totalVestingAllocated;
         s.totalVestingReleased    = totalVestingReleased;
-        s.totalEmergencyDistributed = totalEmergencyDistributed;
 
         s.teamMinted      = totalCategoryMinted[Category.TEAM];
         s.privateMinted   = totalCategoryMinted[Category.PRIVATE];
@@ -554,7 +548,7 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
         uint256 revokedAmount = s.totalAmount - s.releasedAmount;
         s.revoked = true;
         totalVestingAllocated -= revokedAmount;
-        emit VestingRevoked(vestingId, s.beneficiary, revokedAmount, msg.sender);
+        emit TokensReleased(vestingId, s.beneficiary, 0, s.releasedAmount);
     }
 
     function _calculateReleasableAmount(VestingSchedule memory s) internal view returns (uint256) {
@@ -587,18 +581,6 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
     }
 
     // ==================== Distributions (mint) ====================
-
-    function emergencyDistribution(address recipient, uint256 amount)
-    external
-    onlyAdminOrOwner
-    nonReentrant
-    validAddress(recipient)
-    validAmount(amount)
-    {
-        gfToken.mint(recipient, amount);
-        totalEmergencyDistributed += amount;
-        emit EmergencyDistribution(recipient, amount, REASON_EMERGENCY, msg.sender);
-    }
 
     function customDistribution(address recipient, uint256 amount, Category category)
     external
@@ -715,11 +697,13 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
         emit LockWithdrawn(lockId, l.user, l.amount, true);
     }
 
+    /**
+     * @notice Admin cancels a lock and returns funds back to the category allocation address.
+     */
     function adminCancelLock(uint256 lockId) external onlyAdminOrOwner nonReentrant validLockId(lockId) {
         LockRecord storage l = locks[lockId];
         if (l.released) revert LockAlreadyReleased();
 
-        // Fixed destination: corresponding allocationAddress of the lock's category
         address to = allocationAddress[l.category];
         if (to == address(0)) revert InvalidAddress();
 
@@ -952,10 +936,6 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
         );
     }
 
-    function getDistributionStats() external view returns (uint256 _totalEmergency) {
-        return totalEmergencyDistributed;
-    }
-
     function getNextVestingId() external view returns (uint256) {
         return nextVestingId;
     }
@@ -970,7 +950,11 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
 
     function unpause() external onlyOwner { _unpause(); }
 
+    /**
+     * @dev Rescue tokens accidentally sent to this contract. GF token is blocked to protect locked funds.
+     */
     function rescueERC20(address token, address to, uint256 amount) external onlyOwner validAddress(token) validAddress(to) validAmount(amount) {
+        if (token == address(gfToken)) revert NotAuthorized();
         IERC20(token).safeTransfer(to, amount);
         emit ERC20Rescued(token, to, amount);
     }
