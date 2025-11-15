@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts@5.4.0/token/ERC20/IERC20.sol";
 import {Ownable} from "@openzeppelin/contracts@5.4.0/access/Ownable.sol";
@@ -45,7 +45,7 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
 
     // ==================== Constants ====================
 
-    string public constant VERSION = "1.0.0";
+    string public constant VERSION = "1.0.1";
 
     uint256 public constant BPS_DENOMINATOR       = 10_000;   // 100%
     uint256 public constant ART_POOL_ANNUAL_BPS   = 50;       // 0.5% of GF total supply per year
@@ -1214,6 +1214,9 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
     function unpause() external onlyOwner { _unpause(); }
 
     function rescueERC20(address token, address to, uint256 amount) external onlyOwner validAddress(token) validAddress(to) validAmount(amount) {
+        // Prevent rescuing staked tokens (pool assets): ART and GF.
+        // This ensures owner cannot accidentally or maliciously withdraw funds that belong to staking participants.
+        if (token == address(artToken) || token == address(gfToken)) revert InvalidAddress();
         IERC20(token).safeTransfer(to, amount);
         emit ERC20Rescued(token, to, amount);
     }
