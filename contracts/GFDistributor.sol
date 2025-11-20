@@ -24,14 +24,14 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
 
     // ==================== Constants ====================
 
-    string public constant VERSION = "1.0.1";
+    string public constant VERSION = "1.0.2";
 
     // Reference total supply (for documentation, actual cap enforced by GFToken)
     uint256 public constant TOTAL_SUPPLY = 100_000_000_000 * 1e6; // 100B
 
     // Global category allocation percentages (basis points)
-    uint256 public constant TEAM_ALLOCATION_BPS       = 1800; // 18%
-    uint256 public constant PRIVATE_ALLOCATION_BPS    = 1200; // 12%
+    uint256 public constant TEAM_ALLOCATION_BPS       = 2600; // 26%
+    uint256 public constant PRIVATE_ALLOCATION_BPS    = 400;  // 4%
     uint256 public constant PUBLIC_ALLOCATION_BPS     = 1000; // 10%
     uint256 public constant COMMUNITY_ALLOCATION_BPS  = 3000; // 30%
     uint256 public constant ECOSYSTEM_ALLOCATION_BPS  = 2000; // 20%
@@ -40,7 +40,7 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
 
     // Global initial unlock percentages (basis points)
     uint256 public constant TEAM_INITIAL_BPS       = 0;    // 0%
-    uint256 public constant PRIVATE_INITIAL_BPS    = 600;  // 6%
+    uint256 public constant PRIVATE_INITIAL_BPS    = 0;    // 0%
     uint256 public constant PUBLIC_INITIAL_BPS     = 500;  // 5%
     uint256 public constant COMMUNITY_INITIAL_BPS  = 750;  // 7.5%
     uint256 public constant ECOSYSTEM_INITIAL_BPS  = 500;  // 5%
@@ -75,26 +75,35 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
     LIQUIDITY_INITIAL_UNLOCK;
 
     // Vesting parameters per category
-    uint256 public constant TEAM_DURATION = 9 * 365 days;  // 1y cliff + 9y linear
+
+    // TEAM: 1y cliff + 9y linear
+    uint256 public constant TEAM_DURATION = 9 * 365 days;
     uint256 public constant TEAM_CLIFF    = 365 days;
 
-    uint256 public constant PRIVATE_DURATION = 5 * 365 days; // 1y cliff + 5y linear
+    // PRIVATE: 1y cliff + 4y linear (1% per year) -> total 4 years linear after cliff
+    uint256 public constant PRIVATE_DURATION = 4 * 365 days;
     uint256 public constant PRIVATE_CLIFF    = 365 days;
 
+    // PUBLIC: 3 months cliff (90 days), instant unlock at cliff (TGE 5% is initial; this path can be used if needed)
     uint256 public constant PUBLIC_DURATION = 1 days;  // ignored
-    uint256 public constant PUBLIC_CLIFF    = 90 days; // 3 months cliff, instant unlock at cliff
+    uint256 public constant PUBLIC_CLIFF    = 90 days;
 
-    uint256 public constant COMMUNITY_DURATION = 9 * 365 days; // 1y cliff + 9y linear
-    uint256 public constant COMMUNITY_CLIFF    = 365 days;
+    // COMMUNITY: TGE 7.5%, then linear 2.25% per year. No cliff specified after TGE.
+    // Use 10y linear duration without cliff for the remaining allocation handled via vesting schedules.
+    uint256 public constant COMMUNITY_DURATION = 10 * 365 days;
+    uint256 public constant COMMUNITY_CLIFF    = 0;
 
+    // ECOSYSTEM: TGE 5%, then 1y cliff + 7.5y linear
     uint256 public constant ECOSYSTEM_DURATION = (7 * 365 days) + 182 days; // 1y cliff + ~7.5y linear
     uint256 public constant ECOSYSTEM_CLIFF    = 365 days;
 
+    // RESERVE: 5y cliff, instant unlock after cliff
     uint256 public constant RESERVE_DURATION = 1 days;  // ignored
     uint256 public constant RESERVE_CLIFF    = 5 * 365 days;
 
+    // LIQUIDITY: TGE 5% immediate (no cliff). Vesting path is cliff=0, instant; but we keep ignored duration.
     uint256 public constant LIQUIDITY_DURATION = 1 days; // ignored
-    uint256 public constant LIQUIDITY_CLIFF    = 0;      // TGE full unlock
+    uint256 public constant LIQUIDITY_CLIFF    = 0;
 
     // Reason codes
     uint8 public constant REASON_INITIAL_UNLOCK   = 1;
