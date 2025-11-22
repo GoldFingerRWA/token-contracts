@@ -24,16 +24,17 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
 
     // ==================== Constants ====================
 
-    string public constant VERSION = "1.0.2";
+    string public constant VERSION = "1.0.3";
 
     // Reference total supply (for documentation, actual cap enforced by GFToken)
     uint256 public constant TOTAL_SUPPLY = 100_000_000_000 * 1e6; // 100B
 
     // Global category allocation percentages (basis points)
+    // 20% is used by GFStaking
     uint256 public constant TEAM_ALLOCATION_BPS       = 2600; // 26%
     uint256 public constant PRIVATE_ALLOCATION_BPS    = 400;  // 4%
     uint256 public constant PUBLIC_ALLOCATION_BPS     = 1000; // 10%
-    uint256 public constant COMMUNITY_ALLOCATION_BPS  = 3000; // 30%
+    uint256 public constant COMMUNITY_ALLOCATION_BPS  = 1000; // 10%
     uint256 public constant ECOSYSTEM_ALLOCATION_BPS  = 2000; // 20%
     uint256 public constant RESERVE_ALLOCATION_BPS    = 500;  // 5%
     uint256 public constant LIQUIDITY_ALLOCATION_BPS  = 500;  // 5%
@@ -43,7 +44,7 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
     uint256 public constant PRIVATE_INITIAL_BPS    = 0;    // 0%
     uint256 public constant PUBLIC_INITIAL_BPS     = 500;  // 5%
     uint256 public constant COMMUNITY_INITIAL_BPS  = 750;  // 7.5%
-    uint256 public constant ECOSYSTEM_INITIAL_BPS  = 500;  // 5%
+    uint256 public constant ECOSYSTEM_INITIAL_BPS  = 1000;  // 10%
     uint256 public constant RESERVE_INITIAL_BPS    = 0;    // 0%
     uint256 public constant LIQUIDITY_INITIAL_BPS  = 500;  // 5%
 
@@ -93,9 +94,9 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
     uint256 public constant COMMUNITY_DURATION = 10 * 365 days;
     uint256 public constant COMMUNITY_CLIFF    = 0;
 
-    // ECOSYSTEM: TGE 5%, then 1y cliff + 7.5y linear
-    uint256 public constant ECOSYSTEM_DURATION = (7 * 365 days) + 182 days; // 1y cliff + ~7.5y linear
-    uint256 public constant ECOSYSTEM_CLIFF    = 365 days;
+    // ECOSYSTEM: TGE 10%, then 10y linear
+    uint256 public constant ECOSYSTEM_DURATION = 10 * 365 days; // 10y linear
+    uint256 public constant ECOSYSTEM_CLIFF    = 0;
 
     // RESERVE: 5y cliff, instant unlock after cliff
     uint256 public constant RESERVE_DURATION = 1 days;  // ignored
