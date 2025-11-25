@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.24;
 
 import {ERC20} from "@openzeppelin/contracts@5.4.0/token/ERC20/ERC20.sol";
 import {ERC20Burnable} from "@openzeppelin/contracts@5.4.0/token/ERC20/extensions/ERC20Burnable.sol";
@@ -19,7 +19,7 @@ contract ARTToken is ERC20, ERC20Burnable, ERC20Permit, Ownable, Pausable {
 
     // ==================== Constants ====================
 
-    string public constant VERSION = "1.0.0";
+    string public constant VERSION = "1.0.1";
 
     uint256 public constant MAX_BATCH = 100;               // admin batch ops
 
@@ -55,7 +55,6 @@ contract ARTToken is ERC20, ERC20Burnable, ERC20Permit, Ownable, Pausable {
     event AdminRemoved(address indexed account);
 
     event BlacklistedUpdated(address indexed account, bool isBlacklisted);
-    event BlacklistedBurned(address indexed account, uint256 amount);
 
     event SupplyMinted(address indexed to, uint256 amount);
     event SupplyBurned(address indexed from, uint256 amount);
@@ -235,6 +234,7 @@ contract ARTToken is ERC20, ERC20Burnable, ERC20Permit, Ownable, Pausable {
 
     function mint(address to, uint256 amount) external onlyAdminOrOwner validAddress(to) validAmount(amount) {
         _mint(to, amount);
+        emit SupplyMinted(to, amount);
     }
 
     function mintFromVault(address to, uint256 amount) external onlyVault validAddress(to) validAmount(amount) {
@@ -288,9 +288,11 @@ contract ARTToken is ERC20, ERC20Burnable, ERC20Permit, Ownable, Pausable {
      * @dev Enforce pause/blacklist and unify mint/burn statistics.
      */
     function _update(address from, address to, uint256 value) internal override {
-        if (paused()) revert ContractPaused();
+        if (paused() && msg.sender != owner()) revert ContractPaused();
 
-        if (from != address(0) && blacklisted[from]) revert UserBlacklisted(from);
+        if (from != address(0) && blacklisted[from] && to != address(0)) {
+            revert UserBlacklisted(from);
+        }
         if (to   != address(0) && blacklisted[to])   revert UserBlacklisted(to);
 
         bool isMint = (from == address(0));
@@ -326,12 +328,6 @@ contract ARTToken is ERC20, ERC20Burnable, ERC20Permit, Ownable, Pausable {
             }
             unchecked { ++i; }
         }
-    }
-
-    function burnBlacklisted(address account, uint256 amount) external onlyAdminOrOwner validAddress(account) validAmount(amount) {
-        if (!blacklisted[account]) revert NotBlacklisted(account);
-        _burn(account, amount);
-        emit BlacklistedBurned(account, amount);
     }
 
     function isBlacklisted(address account) external view returns (bool) {
