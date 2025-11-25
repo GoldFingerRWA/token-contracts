@@ -32,7 +32,8 @@ interface IGFToken is IERC20 {
  * @title GFStaking
  * @notice
  * - Two pools: ART / GF.
- * - Terms: Flexible (1.0), 30d (1.8), 90d (3.8). After maturity, weight degrades to 1.0.
+ * - Terms: Flexible (1.0), 30d (1.8), 90d (3.8).
+ * - After maturity, weight STAYS at boosted level until withdrawn.
  * - Multi-position model: each user can hold multiple 30d/90d positions (amount, unlockAt).
  * - Early withdraw for locked (not matured) positions with a configurable penalty (bps) sent to feeRecipient.
  * - Incentives: 10-year linear emission; ART pool 0.5%/year, GF pool 1.5%/year based on INITIAL_GF_SUPPLY.
@@ -45,7 +46,7 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
 
     // ==================== Constants ====================
 
-    string public constant VERSION = "1.0.1";
+    string public constant VERSION = "1.1.0";
 
     uint256 public constant BPS_DENOMINATOR       = 10_000;   // 100%
     uint256 public constant ART_POOL_ANNUAL_BPS   = 50;       // 0.5% of GF total supply per year
@@ -76,6 +77,10 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
     uint8 public constant TERM_30   = 1;
     uint8 public constant TERM_90   = 2;
     uint8 public constant TERM_COUNT = 3;
+
+    // Safety Limits
+    // Max positions per term per user to prevent gas limit issues during iteration
+    uint256 public constant MAX_POSITIONS = 200;
 
     // ==================== Roles, Tokens & Recipients ====================
 
@@ -158,7 +163,9 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
     event StakingTogglesUpdated(bool flexibleEnabled, bool lock30Enabled, bool lock90Enabled);
 
     event Staked(uint8 indexed poolId, address indexed user, uint8 termId, uint256 amount, uint256 unlockAtOrZero, uint256 positionIndexOrMax);
-    event Withdrawn(uint8 indexed poolId, address indexed user, uint256 amount);
+
+    event Withdrawn(uint8 indexed poolId, address indexed user, uint8 termId, uint256 amount, uint32 positionIndex);
+
     event EarlyWithdrawn(uint8 indexed poolId, address indexed user, uint8 termId, uint256 positionIndex, uint256 amount, uint256 penalty);
     event RewardClaimed(address indexed user, uint256 amount);
 
@@ -186,11 +193,13 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
     error NotActive();
     error InsufficientBalance();
     error NotLocked();
+    error NotMatured();
     error AlreadyMatured();
     error NothingToClaim();
     error NativeTransferFailed();
     error DeductInsufficientFlexible();
     error Disabled();
+    error MaxPositionsExceeded();
 
     // ==================== Modifiers ====================
 
@@ -264,6 +273,7 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
         uint256 privateLockPeriod;
         uint256 privateImmediateBps;
         uint256 earlyPenaltyBps;
+        uint256 maxPositions;
 
         // Addresses & roles
         address owner;
@@ -337,6 +347,7 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
         s.privateLockPeriod    = PRIVATE_LOCK_PERIOD;
         s.privateImmediateBps  = PRIVATE_IMMEDIATE_BPS;
         s.earlyPenaltyBps      = earlyPenaltyBps;
+        s.maxPositions         = MAX_POSITIONS;
 
         s.owner        = owner();
         s.artToken     = address(artToken);
@@ -577,7 +588,8 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
     }
 
     /**
-     * @dev Withdraw flexible balance and matured locks (after rollover).
+     * @dev Withdraw flexible balance and matured locks.
+     * Tries flexible first, then matured 30d, then matured 90d.
      */
     function withdraw(uint8 poolId, uint256 amount)
     external
@@ -591,15 +603,49 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
         uint256 available = _getWithdrawable(poolId, msg.sender);
         if (amount > available) revert InsufficientBalance();
 
-        _deductFromFlexible(poolId, msg.sender, amount);
+        _deductFromAvailable(poolId, msg.sender, amount);
 
         if (poolId == ART_POOL_ID) {
             artToken.safeTransfer(msg.sender, amount);
         } else {
             gfToken.safeTransfer(msg.sender, amount);
         }
+    }
 
-        emit Withdrawn(poolId, msg.sender, amount);
+    /**
+     * @dev Withdraw a specific matured lock position by index.
+     */
+    function withdrawSpecific(uint8 poolId, uint8 termId, uint256 posIndex)
+    external
+    nonReentrant
+    whenNotPaused
+    validPool(poolId)
+    {
+        // 1. Validate term (must be a lock term)
+        if (termId != TERM_30 && termId != TERM_90) revert InvalidTerm();
+
+        // 2. Sync rewards before modifying state
+        _syncAndSettle(poolId, msg.sender);
+
+        // 3. Get position info
+        (uint256 amount, uint256 unlockAt) = _getLockedPosition(poolId, msg.sender, termId, posIndex);
+
+        // 4. Validate position state
+        if (amount == 0) revert InvalidAmount();
+        if (block.timestamp < unlockAt) revert NotMatured();
+
+        // 5. Reduce locked position (updates weights, removes from array, updates term totals)
+        _reduceLocked(poolId, msg.sender, termId, posIndex, amount);
+
+        // 6. Update Global Pool Totals
+        pools[poolId].totalStaked -= amount;
+        if (poolId == ART_POOL_ID) totalStakedArt -= amount; else totalStakedGf -= amount;
+
+        // 7. Transfer tokens
+        IERC20 token = _tokenOf(poolId);
+        token.safeTransfer(msg.sender, amount);
+
+        emit Withdrawn(poolId, msg.sender, termId, amount, uint32(posIndex));
     }
 
     /**
@@ -681,6 +727,8 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
             p.totalStakedFlex += amount;
             posIndex = type(uint256).max;
         } else if (termId == TERM_30) {
+            if (up.lock30.length >= MAX_POSITIONS) revert MaxPositionsExceeded();
+
             uint256 endTs = block.timestamp + TERM_30D;
             up.lock30.push(Position({amount: amount, unlockAt: endTs}));
 
@@ -690,6 +738,8 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
             p.totalStaked30 += amount;
             posIndex = up.lock30.length - 1;
         } else if (termId == TERM_90) {
+            if (up.lock90.length >= MAX_POSITIONS) revert MaxPositionsExceeded();
+
             uint256 endTs = block.timestamp + TERM_90D;
             up.lock90.push(Position({amount: amount, unlockAt: endTs}));
 
@@ -735,31 +785,121 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
     }
 
     /**
-     * @dev Deduct from flexible bucket.
+     * @dev Deduct amount from available sources in order: Flex -> Matured 30d -> Matured 90d.
      */
-    function _deductFromFlexible(uint8 poolId, address user, uint256 amount) internal {
+    function _deductFromAvailable(uint8 poolId, address user, uint256 amount) internal {
         Pool storage p = pools[poolId];
         UserPositions storage up = users[poolId][user];
 
         uint256 remaining = amount;
+        uint256 nowTs = block.timestamp;
 
+        // 1. Try Flexible
         if (up.flexAmount > 0) {
             uint256 take = up.flexAmount < remaining ? up.flexAmount : remaining;
             up.flexAmount -= take;
 
             uint256 w = (take * BOOST_FLEX) / BOOST_PRECISION;
             if (p.weightedFlex >= w) p.weightedFlex -= w; else p.weightedFlex = 0;
-
             if (p.totalStakedFlex >= take) p.totalStakedFlex -= take; else p.totalStakedFlex = 0;
 
             remaining -= take;
+
+            emit Withdrawn(poolId, user, TERM_FLEX, take, 0);
+        }
+
+        if (remaining == 0) {
+            _finalizeDeduct(poolId, amount);
+            return;
+        }
+
+        // 2. Try Matured 30d
+        uint256 i = 0;
+        while (remaining > 0 && i < up.lock30.length) {
+            Position storage pos = up.lock30[i];
+            // Check if matured
+            if (pos.amount > 0 && pos.unlockAt > 0 && nowTs >= pos.unlockAt) {
+                if (pos.amount > remaining) {
+                    // Partial take
+                    pos.amount -= remaining;
+
+                    // Update weights (30d weight)
+                    uint256 w = (remaining * BOOST_30D) / BOOST_PRECISION;
+                    if (p.weighted30 >= w) p.weighted30 -= w; else p.weighted30 = 0;
+                    if (p.totalStaked30 >= remaining) p.totalStaked30 -= remaining; else p.totalStaked30 = 0;
+
+                    // Emit event for this partial take
+                    emit Withdrawn(poolId, user, TERM_30, remaining, uint32(i));
+
+                    remaining = 0;
+                } else {
+                    // Full take of this position
+                    uint256 take = pos.amount;
+                    remaining -= take;
+
+                    uint256 w = (take * BOOST_30D) / BOOST_PRECISION;
+                    if (p.weighted30 >= w) p.weighted30 -= w; else p.weighted30 = 0;
+                    if (p.totalStaked30 >= take) p.totalStaked30 -= take; else p.totalStaked30 = 0;
+
+                    // Emit event for this full take BEFORE removing index
+                    emit Withdrawn(poolId, user, TERM_30, take, uint32(i));
+
+                    // Remove position
+                    _removePosition(up.lock30, i);
+                    continue;
+                }
+            }
+            i++;
+        }
+
+        if (remaining == 0) {
+            _finalizeDeduct(poolId, amount);
+            return;
+        }
+
+        // 3. Try Matured 90d
+        i = 0;
+        while (remaining > 0 && i < up.lock90.length) {
+            Position storage pos = up.lock90[i];
+            if (pos.amount > 0 && pos.unlockAt > 0 && nowTs >= pos.unlockAt) {
+                if (pos.amount > remaining) {
+                    pos.amount -= remaining;
+
+                    uint256 w = (remaining * BOOST_90D) / BOOST_PRECISION;
+                    if (p.weighted90 >= w) p.weighted90 -= w; else p.weighted90 = 0;
+                    if (p.totalStaked90 >= remaining) p.totalStaked90 -= remaining; else p.totalStaked90 = 0;
+
+                    // Emit event
+                    emit Withdrawn(poolId, user, TERM_90, remaining, uint32(i));
+
+                    remaining = 0;
+                } else {
+                    uint256 take = pos.amount;
+                    remaining -= take;
+
+                    uint256 w = (take * BOOST_90D) / BOOST_PRECISION;
+                    if (p.weighted90 >= w) p.weighted90 -= w; else p.weighted90 = 0;
+                    if (p.totalStaked90 >= take) p.totalStaked90 -= take; else p.totalStaked90 = 0;
+
+                    // Emit event
+                    emit Withdrawn(poolId, user, TERM_90, take, uint32(i));
+
+                    _removePosition(up.lock90, i);
+                    continue;
+                }
+            }
+            i++;
         }
 
         if (remaining != 0) revert DeductInsufficientFlexible();
 
+        _finalizeDeduct(poolId, amount);
+    }
+
+    function _finalizeDeduct(uint8 poolId, uint256 amount) internal {
+        Pool storage p = pools[poolId];
         p.weightedTotal = p.weightedFlex + p.weighted30 + p.weighted90;
         p.totalStaked -= amount;
-
         if (poolId == ART_POOL_ID) totalStakedArt -= amount; else totalStakedGf -= amount;
     }
 
@@ -837,64 +977,14 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
         arr.pop();
     }
 
-    /**
-     * @dev Soft rollover matured positions into flexible; update pool weights accordingly.
-     */
-    function _softRollover(uint8 poolId, UserPositions storage up) internal {
-        Pool storage p = pools[poolId];
-        uint256 nowTs = block.timestamp;
-
-        // 30d positions
-        Position[] storage arr30 = up.lock30;
-        for (uint256 i = 0; i < arr30.length; ) {
-            Position storage pos = arr30[i];
-            if (pos.amount > 0 && pos.unlockAt > 0 && nowTs >= pos.unlockAt) {
-                uint256 amt = pos.amount;
-
-                uint256 wLocked = (amt * BOOST_30D) / BOOST_PRECISION;
-                if (p.weighted30 >= wLocked) p.weighted30 -= wLocked; else p.weighted30 = 0;
-
-                up.flexAmount += amt;
-                uint256 wFlex = (amt * BOOST_FLEX) / BOOST_PRECISION;
-                p.weightedFlex += wFlex;
-
-                _removePosition(arr30, i);
-                continue;
-            }
-            unchecked { ++i; }
-        }
-
-        // 90d positions
-        Position[] storage arr90 = up.lock90;
-        for (uint256 i = 0; i < arr90.length; ) {
-            Position storage pos = arr90[i];
-            if (pos.amount > 0 && pos.unlockAt > 0 && nowTs >= pos.unlockAt) {
-                uint256 amt = pos.amount;
-
-                uint256 wLocked = (amt * BOOST_90D) / BOOST_PRECISION;
-                if (p.weighted90 >= wLocked) p.weighted90 -= wLocked; else p.weighted90 = 0;
-
-                up.flexAmount += amt;
-                uint256 wFlex = (amt * BOOST_FLEX) / BOOST_PRECISION;
-                p.weightedFlex += wFlex;
-
-                _removePosition(arr90, i);
-                continue;
-            }
-            unchecked { ++i; }
-        }
-
-        p.weightedTotal = p.weightedFlex + p.weighted30 + p.weighted90;
-    }
 
     // ==================== Rewards & Settlement ====================
 
     /**
-     * @dev Consolidated settlement: update pool reward, rollover matured, update user reward.
+     * @dev Consolidated settlement: update pool reward, update user reward.
      */
     function _syncAndSettle(uint8 poolId, address user) internal {
         _updatePoolReward(poolId);
-        _softRollover(poolId, users[poolId][user]);
         _updateUserReward(poolId, user);
     }
 
@@ -911,14 +1001,12 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
         if (current <= lastTime) return;
 
         uint256 annualReward = (INITIAL_GF_SUPPLY * p.annualRateBps) / BPS_DENOMINATOR;
-        uint256 rewardPerSecond = annualReward / (365 days);
-
         uint256 elapsed = current - lastTime;
-        uint256 emitted = rewardPerSecond * elapsed;
 
         if (p.weightedTotal > 0) {
-            uint256 addPerWeight = (emitted * REWARD_PRECISION) / p.weightedTotal;
-            p.rewardPerWeightStored += addPerWeight;
+            uint256 numerator = annualReward * elapsed * REWARD_PRECISION;
+            uint256 denominator = 365 days * p.weightedTotal;
+            p.rewardPerWeightStored += numerator / denominator;
         }
         p.lastUpdateTime = current;
     }
@@ -944,10 +1032,10 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
 
     /**
      * @dev Effective weight for a user at current timestamp (read-only).
+     * Locked positions provide boosted weight regardless of expiry, as long as they are in the array.
      */
     function _userEffectiveWeight(uint8 poolId, address user) internal view returns (uint256) {
         UserPositions storage up = users[poolId][user];
-        uint256 nowTs = block.timestamp;
 
         uint256 weight = (up.flexAmount * BOOST_FLEX) / BOOST_PRECISION;
 
@@ -956,22 +1044,14 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
         for (uint256 i = 0; i < arr30.length; i++) {
             Position storage pos = arr30[i];
             if (pos.amount == 0) continue;
-            if (pos.unlockAt > 0 && nowTs < pos.unlockAt) {
-                weight += (pos.amount * BOOST_30D) / BOOST_PRECISION;
-            } else {
-                weight += (pos.amount * BOOST_FLEX) / BOOST_PRECISION;
-            }
+            weight += (pos.amount * BOOST_30D) / BOOST_PRECISION;
         }
         // 90d positions
         Position[] storage arr90 = up.lock90;
         for (uint256 i = 0; i < arr90.length; i++) {
             Position storage pos = arr90[i];
             if (pos.amount == 0) continue;
-            if (pos.unlockAt > 0 && nowTs < pos.unlockAt) {
-                weight += (pos.amount * BOOST_90D) / BOOST_PRECISION;
-            } else {
-                weight += (pos.amount * BOOST_FLEX) / BOOST_PRECISION;
-            }
+            weight += (pos.amount * BOOST_90D) / BOOST_PRECISION;
         }
         return weight;
     }
@@ -1114,13 +1194,13 @@ contract GFStaking is Ownable, ReentrancyGuard, Pausable {
 
         if (current > lastTime) {
             uint256 annualReward = (INITIAL_GF_SUPPLY * p.annualRateBps) / BPS_DENOMINATOR;
-            uint256 rewardPerSecond = annualReward / (365 days);
             uint256 elapsed = current - lastTime;
-            uint256 emitted = rewardPerSecond * elapsed;
 
             uint256 wTotal = p.weightedTotal;
             if (wTotal > 0) {
-                rpt = rpt + (emitted * REWARD_PRECISION) / wTotal;
+                uint256 numerator = annualReward * elapsed * REWARD_PRECISION;
+                uint256 denominator = 365 days * wTotal;
+                rpt = rpt + (numerator / denominator);
             }
         }
 
