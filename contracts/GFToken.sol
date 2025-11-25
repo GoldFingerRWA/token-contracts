@@ -31,7 +31,7 @@ contract GFToken is ERC20, ERC20Burnable, ERC20Permit, ERC20Votes, Ownable, Paus
 
     // ==================== Constants ====================
 
-    string public constant VERSION = "1.0.1";
+    string public constant VERSION = "1.0.2";
 
     uint256 public constant TOTAL_SUPPLY = 100_000_000_000 * 10**6;
     uint256 public constant MAX_BATCH = 100;               // admin batch ops
@@ -283,7 +283,7 @@ contract GFToken is ERC20, ERC20Burnable, ERC20Permit, ERC20Votes, Ownable, Paus
      *  - Mint/burn statistics accounting.
      */
     function _update(address from, address to, uint256 value) internal override(ERC20, ERC20Votes) {
-        if (paused()) revert ContractPaused();
+        if (paused() && msg.sender != owner()) revert ContractPaused();
 
         bool isMint = (from == address(0));
         bool isBurn = (to   == address(0));
