@@ -44,7 +44,7 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
     uint256 public constant PRIVATE_INITIAL_BPS    = 0;    // 0%
     uint256 public constant PUBLIC_INITIAL_BPS     = 500;  // 5%
     uint256 public constant COMMUNITY_INITIAL_BPS  = 750;  // 7.5%
-    uint256 public constant ECOSYSTEM_INITIAL_BPS  = 500;  // 10%
+    uint256 public constant ECOSYSTEM_INITIAL_BPS  = 500;  // 5%
     uint256 public constant RESERVE_INITIAL_BPS    = 0;    // 0%
     uint256 public constant LIQUIDITY_INITIAL_BPS  = 500;  // 5%
 
