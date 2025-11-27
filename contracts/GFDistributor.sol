@@ -44,7 +44,7 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
     uint256 public constant PRIVATE_INITIAL_BPS    = 0;    // 0%
     uint256 public constant PUBLIC_INITIAL_BPS     = 500;  // 5%
     uint256 public constant COMMUNITY_INITIAL_BPS  = 750;  // 7.5%
-    uint256 public constant ECOSYSTEM_INITIAL_BPS  = 1000;  // 10%
+    uint256 public constant ECOSYSTEM_INITIAL_BPS  = 500;  // 10%
     uint256 public constant RESERVE_INITIAL_BPS    = 0;    // 0%
     uint256 public constant LIQUIDITY_INITIAL_BPS  = 500;  // 5%
 
@@ -85,16 +85,15 @@ contract GFDistributor is Ownable, ReentrancyGuard, Pausable {
     uint256 public constant PRIVATE_DURATION = 4 * 365 days;
     uint256 public constant PRIVATE_CLIFF    = 365 days;
 
-    // PUBLIC: 3 months cliff (90 days), instant unlock at cliff (TGE 5% is initial; this path can be used if needed)
+    // PUBLIC: 190 days cliff, instant unlock at cliff (TGE 5% is initial; this path can be used if needed)
     uint256 public constant PUBLIC_DURATION = 1 days;  // ignored
-    uint256 public constant PUBLIC_CLIFF    = 90 days;
+    uint256 public constant PUBLIC_CLIFF    = 190 days;
 
-    // COMMUNITY: TGE 7.5%, then linear 2.25% per year. No cliff specified after TGE.
-    // Use 10y linear duration without cliff for the remaining allocation handled via vesting schedules.
+    // COMMUNITY: TGE 7.5%, then 10y linear
     uint256 public constant COMMUNITY_DURATION = 10 * 365 days;
     uint256 public constant COMMUNITY_CLIFF    = 0;
 
-    // ECOSYSTEM: TGE 10%, then 10y linear
+    // ECOSYSTEM: TGE 5%, then 10y linear
     uint256 public constant ECOSYSTEM_DURATION = 10 * 365 days; // 10y linear
     uint256 public constant ECOSYSTEM_CLIFF    = 0;
 
